@@ -1472,8 +1472,10 @@
 
     <!-- ============ ADMIN: HISTORIAL MENSUAL DE FACTURACIÓN ============ -->
     <section class="app-view" id="view-historialMensual">
-      <div class="topline"><div><span class="eyebrow">Facturación</span><h1>Historial mensual</h1></div></div>
-      <p style="font-size:.85rem;color:var(--off-dim);margin-bottom:18px;">Tocá un mes para ver los pagos cobrados y descargar el resumen (cierre mensual).</p>
+      <div class="topline"><div><span class="eyebrow">Facturación</span><h1>Historial mensual</h1></div>
+        <button type="button" class="btn btn-solid btn-small" id="btnExportarPagos" onclick="descargarPagosExcel()">⬇ Descargar todos los pagos (Excel)</button>
+      </div>
+      <p style="font-size:.85rem;color:var(--off-dim);margin-bottom:18px;">Tocá un mes para ver los pagos cobrados y descargar el resumen (cierre mensual). Con "Descargar todos los pagos" guardás una copia de seguridad de todos los pagos registrados, de todos los meses.</p>
       <div class="grid grid-3" id="historialMensualGrid"></div>
     </section>
 
@@ -2043,7 +2045,7 @@ async function obtenerDocsAlumnos(){
     const bajas = [];
     snapTodos.forEach(d => {
       const data = d.data();
-      if(data && data.eliminado){ bajas.push({ id: d.id, name: sanearTexto(data.name || 'Alumno'), pagos: Array.isArray(data.pagos) ? data.pagos : [] }); return; }
+      if(data && data.eliminado){ bajas.push({ id: d.id, name: sanearTexto(data.name || 'Alumno'), email: normalizarEmail(data.email), pagos: Array.isArray(data.pagos) ? data.pagos : [] }); return; }
       if(data && (data.role === 'alumno' || esAlumnoSinRole(data))) porId.set(d.id, data);
     });
     ALUMNOS_BAJA = bajas;
@@ -4810,7 +4812,7 @@ async function confirmarRegistrarPagoInterno(){
   }
   cerrarRegistrarPago();
   await loadAlumnosReales();
-  if(document.getElementById('view-perfil').classList.contains('active')) renderProfile(uid);
+  if(document.getElementById('view-perfil').classList.contains('active') && currentStudentId === uid) renderProfile(uid);
   showToast(`✅ Pago de ${fmtMoney(monto)} registrado (${s ? s.name.split(' ')[0] + ', ' : ''}${pago.metodo}). Suma en ${mesLabel(fecha.slice(0,7)).toLowerCase()}.`, false);
 }
 
@@ -5021,6 +5023,120 @@ function mesLabel(key){
 }
 
 // Junta todos los pagos reales de todos los alumnos (guardados al marcar "Pagó hoy") en una sola lista.
+// ===== Copia de seguridad: todos los pagos en Excel =====
+// Genera un .xlsx con dos hojas: "Pagos" (uno por fila, de todos los meses, incluidos los de
+// alumnos dados de baja) y "Resumen por mes". Antes de armarlo se vuelven a leer los alumnos de
+// la base, para que la copia tenga lo último guardado. Si no carga la librería de Excel, se
+// descarga lo mismo en CSV (también se abre con Excel).
+const XLSX_CDN = ['https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js', 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'];
+function cargarLibreriaExcel(){
+  if(window.XLSX) return Promise.resolve(window.XLSX);
+  const probar = (i) => new Promise((resolve, reject) => {
+    if(i >= XLSX_CDN.length) return reject(new Error('sin librería'));
+    const sc = document.createElement('script');
+    sc.src = XLSX_CDN[i];
+    sc.onload = () => window.XLSX ? resolve(window.XLSX) : probar(i + 1).then(resolve, reject);
+    sc.onerror = () => { sc.remove(); probar(i + 1).then(resolve, reject); };
+    document.head.appendChild(sc);
+  });
+  return probar(0);
+}
+function filasPagosParaExportar(){
+  const emailDe = {};
+  ALUMNOS_REALES.forEach(a => { emailDe[a.id] = a.email || ''; });
+  ALUMNOS_BAJA.forEach(a => { emailDe[a.id] = a.email || ''; });
+  const bajas = new Set(ALUMNOS_BAJA.map(a => a.id));
+  return getTodosLosPagos().sort((a, b) => a.fechaObj - b.fechaObj).map(p => {
+    const precio = Number(p.precio_lista) || 0;
+    const ymdHasta = parseFechaCalendario(p.vencimientoHasta);
+    const reg = p.registradoEn ? new Date(p.registradoEn) : null;
+    return {
+      'Fecha del pago': fmtDate(p.fechaObj),
+      'Mes': mesLabel(mesKey(p.fechaObj)).charAt(0) + mesLabel(mesKey(p.fechaObj)).slice(1).toLowerCase(),
+      'Alumno': String(p.alumno || '').replace(/ \(dado de baja\)$/, ''),
+      'Email': emailDe[p.uid] || '',
+      'Estado del alumno': bajas.has(p.uid) ? 'Dado de baja' : 'Activo',
+      'Plan': p.plan || '',
+      'Método': p.metodo || 'Sin especificar',
+      'Precio de lista': precio || '',
+      'Descuento': precio ? Math.max(0, Number(p.descuento_aplicado) || 0) : '',
+      'Monto cobrado': Number(p.monto) || 0,
+      'Cuota paga hasta': ymdHasta ? fmtDate(ymdHasta) : '',
+      'Registrado por': p.registradoPor || '',
+      'Registrado el': reg && !isNaN(reg) ? reg.toLocaleString('es-AR') : '',
+      'ID del pago': p.id || ''
+    };
+  });
+}
+function filasResumenPorMes(){
+  const porMes = {};
+  getTodosLosPagos().forEach(p => {
+    const k = mesKey(p.fechaObj);
+    const m = porMes[k] = porMes[k] || { cant: 0, total: 0, metodos: {} };
+    const met = p.metodo || 'Sin especificar';
+    m.cant++; m.total += Number(p.monto) || 0; m.metodos[met] = (m.metodos[met] || 0) + (Number(p.monto) || 0);
+  });
+  const metodos = [...new Set(['Efectivo', 'Transferencia/MP', 'Tarjeta', ...Object.values(porMes).flatMap(m => Object.keys(m.metodos))])];
+  return Object.keys(porMes).sort().map(k => {
+    const fila = { 'Mes': mesLabel(k).charAt(0) + mesLabel(k).slice(1).toLowerCase(), 'Cantidad de pagos': porMes[k].cant };
+    metodos.forEach(met => { fila[met] = porMes[k].metodos[met] || 0; });
+    fila['Total cobrado'] = porMes[k].total;
+    return fila;
+  });
+}
+function descargarArchivo(blob, nombre){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = nombre;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+function csvDeFilas(filas){
+  if(!filas.length) return '';
+  const cols = Object.keys(filas[0]);
+  // ';' es el separador que usa Excel en español. Se evita que un texto empiece con = + - @ (fórmula).
+  const celda = v => {
+    let t = String(v == null ? '' : v);
+    if(typeof v === 'string' && /^[=+\-@]/.test(t)) t = "'" + t;
+    return /[";\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  };
+  return [cols.map(celda).join(';'), ...filas.map(f => cols.map(c => celda(f[c])).join(';'))].join('\r\n');
+}
+async function descargarPagosExcel(){
+  const btn = document.getElementById('btnExportarPagos');
+  const textoOriginal = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Preparando...'; }
+  try{
+    await loadAlumnosReales();
+    if(alumnosLoadError) throw new Error('no se pudieron leer los alumnos (' + alumnosLoadError + ')');
+    const pagos = filasPagosParaExportar();
+    if(!pagos.length){ alert('Todavía no hay pagos registrados para descargar.'); return; }
+    const resumen = filasResumenPorMes();
+    const fecha = fechaLocalYMD(new Date());
+    let XLSX = null;
+    try{ XLSX = await cargarLibreriaExcel(); }catch(err){ console.warn('No cargó la librería de Excel, se descarga en CSV:', err); }
+    if(XLSX){
+      const libro = XLSX.utils.book_new();
+      const hojaPagos = XLSX.utils.json_to_sheet(pagos);
+      hojaPagos['!cols'] = Object.keys(pagos[0]).map(c => ({ wch: Math.min(40, Math.max(c.length + 2, ...pagos.map(f => String(f[c]).length + 2))) }));
+      const hojaResumen = XLSX.utils.json_to_sheet(resumen);
+      hojaResumen['!cols'] = Object.keys(resumen[0]).map(c => ({ wch: Math.max(14, c.length + 2) }));
+      XLSX.utils.book_append_sheet(libro, hojaPagos, 'Pagos');
+      XLSX.utils.book_append_sheet(libro, hojaResumen, 'Resumen por mes');
+      XLSX.writeFile(libro, `pagos-sinergia-anisacate-${fecha}.xlsx`);
+    }else{
+      const csv = '\ufeff' + csvDeFilas(pagos);
+      descargarArchivo(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `pagos-sinergia-anisacate-${fecha}.csv`);
+    }
+    const total = pagos.reduce((a, f) => a + (Number(f['Monto cobrado']) || 0), 0);
+    showToast(`✅ Descargados ${pagos.length} pago${pagos.length === 1 ? '' : 's'} (total ${fmtMoney(total)}). Guardá el archivo como copia de seguridad.`, false);
+  }catch(err){
+    alert('No se pudo descargar la copia de los pagos (' + (err.message || err.code || err) + ').');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = textoOriginal; }
+  }
+}
+
 function getTodosLosPagos(){
   const todos = [];
   const agregar = (s, sufijo) => (s.pagos || []).forEach(p => {
