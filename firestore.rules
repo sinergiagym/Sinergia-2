@@ -1,8 +1,9 @@
 rules_version = '2';
 // Reglas de seguridad — Sinergia (sede 2)
 // - El admin (users/{uid}.role == 'admin') puede leer y escribir todo.
-// - Cada alumno solo puede leer su propio documento y sus ingresos, y solo puede
-//   modificar sus datos de entrenamiento/perfil: nunca su plan, cuota, pagos ni rol.
+// - Cada alumno solo puede leer su propio documento, y solo puede modificar sus datos de
+//   entrenamiento/perfil: nunca su plan, cuota, pagos, vencimiento ni rol.
+// - Esta sede NO registra asistencias en la app (los ingresos se controlan con el molinete).
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -28,8 +29,11 @@ service cloud.firestore {
         && request.resource.data.role == 'alumno'
         && request.resource.data.get('plan', null) == null
         && request.resource.data.get('amount', 0) == 0
+        && request.resource.data.get('due', null) == null
+        && request.resource.data.get('membership', 'Pendiente') == 'Pendiente'
         && !('pagos' in request.resource.data)
         && !('vencimiento' in request.resource.data)
+        && !('vencimientoRef' in request.resource.data)
         && !('cuotaInicio' in request.resource.data)
         && !('frozen' in request.resource.data)
         && !('eliminado' in request.resource.data)
@@ -42,12 +46,6 @@ service cloud.firestore {
       );
 
       allow delete: if isAdmin();
-
-      // Ingresos al gimnasio (los registra recepción/admin)
-      match /checkins/{checkinId} {
-        allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
-        allow write: if isAdmin();
-      }
     }
 
     // Planes, alias, banco de ejercicios, plantillas: lo leen todos los que inician sesión
